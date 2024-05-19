@@ -1,62 +1,63 @@
 import os
 import subprocess
 from collections import defaultdict, deque
-import docker
+import logging
+import re
 
-def find_packages(directory):
-    deb_files = []
-    rpm_files = []
-    for root, _, files in os.walk(directory):
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+
+def find_packages(packages_dir):
+    package_files = []
+    for root, _, files in os.walk(packages_dir):
         for file in files:
-            if file.endswith('.deb'):
-                deb_files.append(os.path.join(root, file))
-            elif file.endswith('.rpm'):
-                rpm_files.append(os.path.join(root, file))
-    return deb_files, rpm_files
+            if file.endswith('.deb') or file.endswith('.rpm'):
+                package_files.append(os.path.join(root, file))
+    return package_files
 
-def extract_dependencies_docker(client, image, container_name, package_path, command):
-    # Create and start the container
-    container = client.containers.run(image, command, name=container_name, volumes={
-        package_path: {'bind': '/packages', 'mode': 'ro'}
-    }, detach=True)
-
-    # Wait for the container to finish
-    exit_code = container.wait()
-    output = container.logs().decode('utf-8')
-    container.remove()
-
-    if exit_code['StatusCode'] != 0:
-        raise RuntimeError(f"Command {command} failed with output: {output}")
-
-    return output
-
-def extract_deb_dependencies(client, image, container_name, deb_file):
-    command = ['dpkg-deb', '-I', f'/packages/{os.path.basename(deb_file)}']
-    output = extract_dependencies_docker(client, image, container_name, os.path.dirname(deb_file), command)
-    dependencies = []
+def extract_dependencies_deb(package_path):
+    dependencies = set()
+    command = ['dpkg-deb', '-I', package_path]
+    output = subprocess.check_output(command, text=True)
     for line in output.splitlines():
         if line.startswith(' Depends:'):
             deps = line.split('Depends:')[1].strip().split(', ')
-            dependencies.extend(dep.split()[0] for dep in deps)
+            dependencies.update(dep.split()[0] for dep in deps)
     return dependencies
 
-def extract_rpm_dependencies(client, image, container_name, rpm_file):
-    command = ['rpm', '-qpR', f'/packages/{os.path.basename(rpm_file)}']
-    output = extract_dependencies_docker(client, image, container_name, os.path.dirname(rpm_file), command)
-    dependencies = output.splitlines()
+def extract_dependencies_rpm(package_path):
+    dependencies = set()
+    command = ['rpm', '-qpR', package_path]
+    output = subprocess.check_output(command, text=True, stderr=subprocess.DEVNULL)
+
+    pattern = re.compile(r'^\w+(?:-\w+)*\s*(?:=\s*.+)?$')
+    for line in output.split("\n"):
+        match = pattern.match(line)
+        if match:
+            dependencies.add(match.group(0).split('=')[0].strip())
+
     return dependencies
 
-def resolve_dependencies(client, image, container_name, packages, extract_function):
+
+def extract_dependencies(package_path):
+    if package_path.endswith('.deb'):
+        return extract_dependencies_deb(package_path)
+    elif package_path.endswith('.rpm'):
+        return extract_dependencies_rpm(package_path)
+    else:
+        raise ValueError("Unsupported package format")
+
+def resolve_dependencies(package_files):
     all_dependencies = defaultdict(set)
-    package_queue = deque(packages)
+    package_queue = deque(package_files)
     
     while package_queue:
-        package = package_queue.popleft()
-        if package in all_dependencies:
+        package_file = package_queue.popleft()
+        if package_file in all_dependencies:
             continue
         
-        dependencies = extract_function(client, image, container_name, package)
-        all_dependencies[package].update(dependencies)
+        dependencies = extract_dependencies(package_file)
+        all_dependencies[package_file].update(dependencies)
         
         for dep in dependencies:
             dep_file = find_package_file(dep)
@@ -71,25 +72,37 @@ def find_package_file(package_name):
     # heuristics or mapping to identify the correct file.
     return None
 
-def main(directory):
-    deb_files, rpm_files = find_packages(directory)
-    client = docker.from_env()
-    image = 'dependency-extractor:latest'
-    container_name = 'dependency_extractor_container'
+def generate_install_command(package_file, dependencies):
+    if package_file.endswith(".rpm"):
+        install_command = "dnf install -y"
+    elif package_file.endswith(".deb"):
+        install_command = "apt-get install -y"
+    else:
+        raise ValueError("Unsupported package type. Supported types are 'rpm' and 'deb'.")
+
+    install_command += " " + " ".join(dependencies)
+    return install_command
+
+def main(packages_dir):
+    package_files = find_packages(packages_dir)
     
-    deb_dependencies = resolve_dependencies(client, image, container_name, deb_files, extract_deb_dependencies)
-    rpm_dependencies = resolve_dependencies(client, image, container_name, rpm_files, extract_rpm_dependencies)
+    if not package_files:
+        logging.error("No package files found in the specified directory.")
+        return
     
-    for package, deps in deb_dependencies.items():
-        print(f"Package: {package}")
+    dependencies = resolve_dependencies(package_files)
+    
+    for package_file, deps in dependencies.items():
+        print(f"Package File: {package_file}")
         print(f"Dependencies: {', '.join(deps)}")
-        print()
-    
-    for package, deps in rpm_dependencies.items():
-        print(f"Package: {package}")
-        print(f"Dependencies: {', '.join(deps)}")
+        
+        # Generate installation command
+        install_command = generate_install_command(package_file, deps)
+        print(f"Installation command: {install_command}")
         print()
 
+
+
 if __name__ == "__main__":
-    directory = 'path/to/your/packages'
-    main(directory)
+    packages_dir = '/app/packages_dir'
+    main(packages_dir)

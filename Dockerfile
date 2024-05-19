@@ -3,16 +3,16 @@ FROM debian:latest
 
 # Install necessary tools
 RUN apt-get update && \
-    apt-get install -y rpm dpkg
+    apt-get install -y dpkg python3 rpm
 
 # Set the working directory
 WORKDIR /packages
 
 # Copy the script into the container
-COPY extract_dependencies.py /packages/
+COPY dep_extractor.py /packages/
 
 # Make the script executable
-RUN chmod +x /packages/extract_dependencies.py
+RUN chmod +x /packages/dep_extractor.py
 
 # Command to run the script
-CMD ["python3", "/packages/package_extractor.py"]
+CMD ["python3", "/packages/dep_extractor.py"]
